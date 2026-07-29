@@ -2,11 +2,13 @@ import asyncio
 import logging
 import time
 from dataclasses import dataclass
+from pathlib import Path
 
 import ray
 from sglang.srt.constants import GPU_MEMORY_TYPE_CUDA_GRAPH, GPU_MEMORY_TYPE_KV_CACHE, GPU_MEMORY_TYPE_WEIGHTS
 
 from miles.ray.rollout.addr_allocator import PortCursors
+from miles.ray.rollout.benchmark_data import load_benchmark_samples
 from miles.ray.rollout.debug_data import RolloutDataInjectionUtil, load_debug_rollout_data, save_debug_rollout_data
 from miles.ray.rollout.metrics import log_eval_rollout_data, log_rollout_data
 from miles.ray.rollout.rollout_data_conversion import postprocess_rollout_data
@@ -74,6 +76,9 @@ class RolloutManager:
         logger.info(f"import {self.args.rollout_function_path} as generate_rollout function.")
         logger.info(f"import {self.args.eval_function_path} as eval_generate_rollout function.")
 
+        self.benchmark_samples = (
+            load_benchmark_samples(Path(self.args.benchmark_data)) if self.args.benchmark_data is not None else None
+        )
         if self.args.debug_train_only:
             self.servers: dict[str, RolloutServer] = {}
         else:
@@ -151,7 +156,14 @@ class RolloutManager:
             self._metric_checker.on_eval(metrics)
 
     async def _get_rollout_data(self, rollout_id):
-        if self.args.load_debug_rollout_data:
+        if self.benchmark_samples is not None:
+            data, metadata = postprocess_rollout_data(
+                self.args,
+                self.benchmark_samples,
+                train_parallel_config=self.train_parallel_config,
+            )
+            metrics = None
+        elif self.args.load_debug_rollout_data:
             data, metadata = load_debug_rollout_data(self.args, rollout_id=rollout_id)
             metrics = None
         else:
