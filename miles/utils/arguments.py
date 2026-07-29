@@ -2067,6 +2067,18 @@ def get_miles_extra_args_provider(add_custom_arguments=None):
                 help="Subsample a portion of the debug rollout data for faster debugging.",
             )
             parser.add_argument(
+                "--benchmark-data",
+                type=str,
+                default=None,
+                help="Replay a prepared RL benchmark artifact through the training path.",
+            )
+            parser.add_argument(
+                "--benchmark-output",
+                type=str,
+                default=None,
+                help="Write warmup-separated training step times and peak GPU memory to this JSON file.",
+            )
+            parser.add_argument(
                 "--debug-rollout-only",
                 action="store_true",
                 default=False,
@@ -3200,6 +3212,19 @@ def miles_validate_args(args):
             "will not instantiate sglang servers and will only run the training process."
         )
         args.debug_train_only = True
+
+    if args.benchmark_data is not None:
+        assert args.load_debug_rollout_data is None, (
+            "--benchmark-data and --load-debug-rollout-data are mutually exclusive"
+        )
+        logger.info(
+            f"benchmark_data {args.benchmark_data} is set, "
+            "will not instantiate sglang servers and will replay one batch per rollout."
+        )
+        args.debug_train_only = True
+        args.use_dynamic_global_batch_size = True
+        args.disable_rollout_trim_samples = False
+        args.rewards_normalization = False
 
     assert (args.ci_inject_rollout_data_path is None) == (args.ci_inject_rollout_data_start_rollout_id is None), (
         "--ci-inject-rollout-data-path and --ci-inject-rollout-data-start-rollout-id " "must be set together."

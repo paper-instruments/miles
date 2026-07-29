@@ -474,6 +474,9 @@ class MegatronTrainRayActor(TrainRayActor):
         witness_info: WitnessInfo | None,
         attempt: int,
     ) -> TrainStepOutcome:
+        if self.args.benchmark_output is not None:
+            torch.cuda.reset_peak_memory_stats()
+
         # Create data iterator for log_probs and train.
         data_iterator, num_microbatches = get_data_iterator(self.args, self.model, rollout_data)
         num_optimizer_steps = len(num_microbatches)
@@ -617,7 +620,16 @@ class MegatronTrainRayActor(TrainRayActor):
 
             commit_trained_batch(rollout_data, rollout_id, self._multi_lora_pending_push)
 
-        log_perf_data(rollout_id, self.args, extra_metrics=self.weight_updater.pop_metrics())
+        extra_metrics = self.weight_updater.pop_metrics()
+        if self.args.benchmark_output is not None:
+            peak_memory = torch.tensor(
+                torch.cuda.max_memory_reserved() / 1024**3,
+                dtype=torch.float64,
+                device=torch.device("cuda", torch.cuda.current_device()),
+            )
+            dist.all_reduce(peak_memory, op=dist.ReduceOp.MAX)
+            extra_metrics["perf/peak_memory_gib"] = peak_memory.item()
+        log_perf_data(rollout_id, self.args, extra_metrics=extra_metrics)
 
         self._heartbeat.bump()
         return train_step_outcome
