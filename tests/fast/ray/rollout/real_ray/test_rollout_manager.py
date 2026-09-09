@@ -235,6 +235,33 @@ class TestRolloutManagerInit:
         assert manager.generate_rollout is not None
         assert manager.eval_generate_rollout is not None
 
+    async def test_benchmark_replay_skips_rollout_construction(
+        self,
+        ray_local_mode,
+        tmp_path,
+        patch_low_level,
+        monkeypatch,
+    ):
+        import miles.ray.rollout.rollout_manager as rmgr
+
+        args = _make_test_args(tmp_path, models=[("actor", True)])
+        args.debug_train_only = True
+        args.benchmark_data = str(tmp_path / "benchmark")
+        args.rollout_num_gpus = None
+        monkeypatch.delenv("MILES_USE_LEGACY_ROLLOUT_V1", raising=False)
+        monkeypatch.setattr(rmgr, "load_benchmark_samples", lambda path: [])
+
+        def fail_if_loaded(*args, **kwargs):
+            pytest.fail("benchmark replay must not construct rollout functions")
+
+        monkeypatch.setattr(rmgr, "load_rollout_function", fail_if_loaded)
+
+        manager = _make_manager(args, pg=None)
+
+        assert manager.generate_rollout is None
+        assert manager.eval_generate_rollout is None
+        assert manager.benchmark_samples == []
+
     async def test_init_creates_live_mock_engines_via_real_start_rollout_servers(
         self,
         ray_local_mode,
