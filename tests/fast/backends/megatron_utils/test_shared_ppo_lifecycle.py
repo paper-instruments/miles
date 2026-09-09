@@ -251,6 +251,31 @@ def _actor_train_args(**overrides):
     return Namespace(**(defaults | overrides))
 
 
+def test_compute_log_prob_offloads_optimizer_state_before_forward(actor_module, monkeypatch):
+    worker = object.__new__(actor_module.MegatronTrainRayActor)
+    worker.args = object()
+    worker.model = [object()]
+    worker.optimizer = Mock()
+    events = []
+    worker.optimizer.offload_optimizer_state_for_forward.side_effect = lambda: events.append("offload")
+
+    @contextmanager
+    def passthrough_timer(_name):
+        yield
+
+    def capture_forward(*_args, **_kwargs):
+        events.append("forward")
+        return {"log_probs": [object()]}
+
+    monkeypatch.setattr(actor_module, "timer", passthrough_timer)
+    monkeypatch.setattr(actor_module, "forward_only", capture_forward)
+
+    result = worker.compute_log_prob([], [], rollout_id=7)
+
+    assert events == ["offload", "forward"]
+    assert "log_probs" in result
+
+
 def _actor_reuse_worker(actor_module, **args_overrides):
     worker = object.__new__(actor_module.MegatronTrainRayActor)
     worker.args = _actor_train_args(use_critic=False, **args_overrides)

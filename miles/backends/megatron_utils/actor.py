@@ -369,7 +369,9 @@ class MegatronTrainRayActor(TrainRayActor):
         rollout_id: int,
         store_prefix: str = "",
     ) -> dict[str, list[torch.Tensor]]:
-
+        # Unlike Megatron's training forward, this forward-only pass runs outside
+        # train_step, so it must enter the optimizer's forward residency state itself.
+        self.optimizer.offload_optimizer_state_for_forward()
         with timer(f"{store_prefix}log_probs"):
             return forward_only(
                 get_log_probs_and_entropy,
