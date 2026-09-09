@@ -70,6 +70,18 @@ class TestPostprocessRolloutData:
         assert meta["dynamic_global_batch_size"] == 10
         assert len(out) == 10
 
+    def test_dynamic_batch_size_counts_compact_rollouts(self):
+        args = make_args(global_batch_size=64, disable_rollout_trim_samples=False, use_dynamic_global_batch_size=True)
+        data = [make_sample(index=index) for index in range(5)]
+        data[0].rollout_id = data[1].rollout_id = 0
+        data[2].rollout_id = data[3].rollout_id = 1
+        data[4].rollout_id = 2
+
+        out, meta = postprocess_rollout_data(args, data, train_parallel_config={"dp_size": 1})
+
+        assert out == data
+        assert meta["dynamic_global_batch_size"] == 3
+
     def test_flattens_nested_list_of_lists(self):
         """The function supports list[list[Sample]] input by flattening."""
         args = make_args(global_batch_size=2, disable_rollout_trim_samples=True, use_dynamic_global_batch_size=False)

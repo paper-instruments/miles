@@ -25,20 +25,23 @@ def postprocess_rollout_data(args, data, train_parallel_config):
     while isinstance(data[0], list):
         data = list(itertools.chain.from_iterable(data))
 
+    # Compact rollouts can contain several training samples. Global batch size
+    # counts rollouts; the scheduler keeps their samples together.
+    is_compact = any(s.rollout_id is not None for s in data)
+    batch_items = len({s.rollout_id for s in data}) if is_compact else len(data)
+
+    global_batch_size = args.global_batch_size
+    if args.use_dynamic_global_batch_size:
+        batch_item_name = "rollouts" if is_compact else "samples"
+        logger.info(f"Collected {batch_items} {batch_item_name} to train with dynamic global batch size")
+        global_batch_size = _compute_dynamic_global_batch_size(
+            args, train_parallel_config=train_parallel_config, num_samples=batch_items
+        )
+        metadata["dynamic_global_batch_size"] = global_batch_size
+
     # Compact rollouts must not be trimmed by sample count; the schedule drops
     # whole trailing rollouts instead.
-    is_compact = any(s.rollout_id is not None for s in data)
-
     if not args.disable_rollout_trim_samples and not is_compact:
-        global_batch_size = args.global_batch_size
-        if args.use_dynamic_global_batch_size:
-            logger.info(f"Collected {len(data)} samples from rollout to train with dynamic global batch size")
-            dynamic_global_batch_size = _compute_dynamic_global_batch_size(
-                args, train_parallel_config=train_parallel_config, num_samples=len(data)
-            )
-            metadata["dynamic_global_batch_size"] = dynamic_global_batch_size
-            global_batch_size = dynamic_global_batch_size
-
         if len(data) % global_batch_size != 0:
             trim_len = (len(data) // global_batch_size) * global_batch_size
             if trim_len == 0:
