@@ -646,12 +646,16 @@ class MegatronTrainRayActor(TrainRayActor):
         extra_metrics = self.weight_updater.pop_metrics()
         if self.args.benchmark_output is not None:
             peak_memory = torch.tensor(
-                torch.cuda.max_memory_reserved() / 1024**3,
+                [
+                    torch.cuda.max_memory_allocated() / 1024**3,
+                    torch.cuda.max_memory_reserved() / 1024**3,
+                ],
                 dtype=torch.float64,
                 device=torch.device("cuda", torch.cuda.current_device()),
             )
             dist.all_reduce(peak_memory, op=dist.ReduceOp.MAX)
-            extra_metrics["perf/peak_memory_gib"] = peak_memory.item()
+            extra_metrics["perf/peak_allocated_memory_gib"] = peak_memory[0].item()
+            extra_metrics["perf/peak_memory_gib"] = peak_memory[1].item()
         log_perf_data(rollout_id, self.args, extra_metrics=extra_metrics)
 
         self._heartbeat.bump()

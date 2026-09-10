@@ -56,12 +56,17 @@ def log_perf_data_raw(
             log_dict["perf/step_time"] = total_time
             log_dict["perf/wait_time_ratio"] = log_dict["perf/train_wait_time"] / total_time
 
-    if "perf/train_time" in log_dict and "perf/peak_memory_gib" in log_dict:
+    if (
+        "perf/train_time" in log_dict
+        and "perf/peak_memory_gib" in log_dict
+        and "perf/peak_allocated_memory_gib" in log_dict
+    ):
         _write_benchmark_step(
             args,
             rollout_id,
             step_seconds=log_dict["perf/train_time"],
             peak_memory_gib=log_dict["perf/peak_memory_gib"],
+            peak_allocated_memory_gib=log_dict["perf/peak_allocated_memory_gib"],
         )
 
     logger.info(f"perf {rollout_id}: {log_dict}")
@@ -77,6 +82,7 @@ def _write_benchmark_step(
     *,
     step_seconds: float,
     peak_memory_gib: float,
+    peak_allocated_memory_gib: float,
 ) -> None:
     if args.benchmark_output is None:
         return
@@ -86,12 +92,14 @@ def _write_benchmark_step(
         "warmup_steps": 1,
         "step_seconds": [],
         "peak_memory_gib": [],
+        "peak_allocated_memory_gib": [],
     }
     if rollout_id != args.start_rollout_id:
         if path.exists():
             result = json.loads(path.read_text(encoding="utf-8"))
         result["step_seconds"].append(float(step_seconds))
         result["peak_memory_gib"].append(float(peak_memory_gib))
+        result["peak_allocated_memory_gib"].append(float(peak_allocated_memory_gib))
 
     path.parent.mkdir(parents=True, exist_ok=True)
     temporary_path = path.with_name(f".{path.name}.tmp")
