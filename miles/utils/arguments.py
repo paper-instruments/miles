@@ -2073,6 +2073,12 @@ def get_miles_extra_args_provider(add_custom_arguments=None):
                 help="Replay a prepared RL benchmark artifact through the training path.",
             )
             parser.add_argument(
+                "--benchmark-warmup-data",
+                type=str,
+                default=None,
+                help="Replay this prepared artifact for the first benchmark rollout only.",
+            )
+            parser.add_argument(
                 "--benchmark-output",
                 type=str,
                 default=None,
@@ -3212,6 +3218,9 @@ def miles_validate_args(args):
             "will not instantiate sglang servers and will only run the training process."
         )
         args.debug_train_only = True
+
+    if args.benchmark_warmup_data is not None:
+        assert args.benchmark_data is not None, "--benchmark-warmup-data requires --benchmark-data"
 
     if args.benchmark_data is not None:
         assert args.load_debug_rollout_data is None, (

@@ -110,6 +110,7 @@ def make_args(**overrides: Any) -> Namespace:
         load_debug_rollout_data=None,
         load_debug_rollout_data_subsample=None,
         benchmark_data=None,
+        benchmark_warmup_data=None,
         benchmark_output=None,
         ci_inject_rollout_data_path=None,
         ci_inject_rollout_data_start_rollout_id=None,

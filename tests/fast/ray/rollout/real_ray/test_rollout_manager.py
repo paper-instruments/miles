@@ -247,9 +247,10 @@ class TestRolloutManagerInit:
         args = _make_test_args(tmp_path, models=[("actor", True)])
         args.debug_train_only = True
         args.benchmark_data = str(tmp_path / "benchmark")
+        args.benchmark_warmup_data = str(tmp_path / "warmup")
         args.rollout_num_gpus = None
         monkeypatch.delenv("MILES_USE_LEGACY_ROLLOUT_V1", raising=False)
-        monkeypatch.setattr(rmgr, "load_benchmark_samples", lambda path: [])
+        monkeypatch.setattr(rmgr, "load_benchmark_samples", lambda path: [path.name])
 
         def fail_if_loaded(*args, **kwargs):
             pytest.fail("benchmark replay must not construct rollout functions")
@@ -260,7 +261,18 @@ class TestRolloutManagerInit:
 
         assert manager.generate_rollout is None
         assert manager.eval_generate_rollout is None
-        assert manager.benchmark_samples == []
+        assert manager.benchmark_samples == ["benchmark"]
+        assert manager.benchmark_warmup_samples == ["warmup"]
+
+        manager.train_parallel_config = None
+        monkeypatch.setattr(rmgr, "postprocess_rollout_data", lambda args, data, train_parallel_config: (data, {}))
+        warmup_data, _, _ = await manager._get_rollout_data(7)
+        repeated_warmup_data, _, _ = await manager._get_rollout_data(7)
+        measured_data, _, _ = await manager._get_rollout_data(8)
+
+        assert warmup_data == ["warmup"]
+        assert repeated_warmup_data == ["warmup"]
+        assert measured_data == ["benchmark"]
 
     async def test_init_creates_live_mock_engines_via_real_start_rollout_servers(
         self,

@@ -101,6 +101,12 @@ class RolloutManager:
         self.benchmark_samples = (
             load_benchmark_samples(Path(self.args.benchmark_data)) if self.args.benchmark_data is not None else None
         )
+        self.benchmark_warmup_samples = (
+            load_benchmark_samples(Path(self.args.benchmark_warmup_data))
+            if self.args.benchmark_warmup_data is not None
+            else None
+        )
+        self._benchmark_warmup_rollout_id = None
         if self.args.debug_train_only:
             self.servers: dict[str, RolloutServer] = {}
         else:
@@ -247,9 +253,15 @@ class RolloutManager:
 
     async def _get_rollout_data(self, rollout_id):
         if self.benchmark_samples is not None:
+            benchmark_samples = self.benchmark_samples
+            if self.benchmark_warmup_samples is not None:
+                if self._benchmark_warmup_rollout_id is None:
+                    self._benchmark_warmup_rollout_id = rollout_id
+                if rollout_id == self._benchmark_warmup_rollout_id:
+                    benchmark_samples = self.benchmark_warmup_samples
             data, metadata = postprocess_rollout_data(
                 self.args,
-                self.benchmark_samples,
+                benchmark_samples,
                 train_parallel_config=self.train_parallel_config,
             )
             metrics = None
