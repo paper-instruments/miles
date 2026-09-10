@@ -407,7 +407,12 @@ def log_multi_turn_data(rollout_id: int, args: Namespace, rollout_data: RolloutB
         )
 
 
-def log_perf_data(rollout_id: int, args: Namespace, extra_metrics: dict | None = None) -> None:
+def log_perf_data(
+    rollout_id: int,
+    args: Namespace,
+    extra_metrics: dict | None = None,
+    benchmark_memory_by_rank: list[dict] | None = None,
+) -> None:
     parallel_state = get_parallel_state()
     train_metric_utils.log_perf_data_raw(
         rollout_id=rollout_id,
@@ -419,6 +424,7 @@ def log_perf_data(rollout_id: int, args: Namespace, extra_metrics: dict | None =
         ),
         compute_total_fwd_flops=lambda seq_lens: fwd_tflops_per_gpu(seq_lens, args, dist.get_world_size()),
         extra_metrics=extra_metrics,
+        benchmark_memory_by_rank=benchmark_memory_by_rank,
     )
 
 

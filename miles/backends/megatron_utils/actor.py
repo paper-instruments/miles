@@ -19,6 +19,7 @@ from miles.utils import train_dump_utils
 from miles.utils.argparse_utils import inplace_modify_args
 from miles.utils.audit_utils.event_logger.logger import event_logger_context
 from miles.utils.audit_utils.witness.allocator import WitnessInfo
+from miles.utils.benchmark_memory import CudaPhaseMemoryTracker, cuda_phase, global_phase_peaks
 from miles.utils.context_utils import with_defer
 from miles.utils.distributed_utils import get_gloo_group
 from miles.utils.ft_utils.indep_dp import IndepDPInfo
@@ -390,19 +391,21 @@ class MegatronTrainRayActor(TrainRayActor):
         num_microbatches: list[int],
         rollout_id: int,
         store_prefix: str = "",
+        benchmark_memory: CudaPhaseMemoryTracker | None = None,
     ) -> dict[str, list[torch.Tensor]]:
-
-        with timer(f"{store_prefix}log_probs"):
-            return forward_only(
-                get_log_probs_and_entropy,
-                self.args,
-                self.model,
-                data_iterator,
-                num_microbatches,
-                rollout_id=rollout_id,
-                store_prefix=store_prefix,
-                fp32_output=False,
-            )
+        phase_name = f"{store_prefix or 'actor_'}log_probs_forward"
+        with cuda_phase(benchmark_memory, phase_name):
+            with timer(f"{store_prefix}log_probs"):
+                return forward_only(
+                    get_log_probs_and_entropy,
+                    self.args,
+                    self.model,
+                    data_iterator,
+                    num_microbatches,
+                    rollout_id=rollout_id,
+                    store_prefix=store_prefix,
+                    fp32_output=False,
+                )
 
     @with_logs
     @event_logger_context(
@@ -497,11 +500,11 @@ class MegatronTrainRayActor(TrainRayActor):
         witness_info: WitnessInfo | None,
         attempt: int,
     ) -> TrainStepOutcome:
-        if self.args.benchmark_output is not None:
-            torch.cuda.reset_peak_memory_stats()
+        benchmark_memory = self._create_benchmark_memory_tracker()
 
         # Create data iterator for log_probs and train.
-        data_iterator, num_microbatches = get_data_iterator(self.args, self.model, rollout_data)
+        with cuda_phase(benchmark_memory, "prepare_train_data"):
+            data_iterator, num_microbatches = get_data_iterator(self.args, self.model, rollout_data)
         num_optimizer_steps = len(num_microbatches)
         skip_actor_forward_only = self.args.skip_actor_forward_only
         if skip_actor_forward_only:
@@ -535,6 +538,7 @@ class MegatronTrainRayActor(TrainRayActor):
                             num_microbatches,
                             rollout_id=rollout_id,
                             store_prefix="ref_",
+                            benchmark_memory=benchmark_memory,
                         )
                     )
                 # Forward teacher model to get teacher_log_probs for Megatron-based OPD
@@ -547,6 +551,7 @@ class MegatronTrainRayActor(TrainRayActor):
                             num_microbatches,
                             rollout_id=rollout_id,
                             store_prefix="teacher_",
+                            benchmark_memory=benchmark_memory,
                         )
                     )
                 self._switch_model("old_actor" if self.args.keep_old_actor else "actor")
@@ -565,6 +570,7 @@ class MegatronTrainRayActor(TrainRayActor):
                             num_microbatches,
                             rollout_id=rollout_id,
                             store_prefix="",
+                            benchmark_memory=benchmark_memory,
                         )
                     )
                     for m in all_replay_managers:
@@ -587,8 +593,9 @@ class MegatronTrainRayActor(TrainRayActor):
 
                 # Calculate adv and returns. Need to performed before training (instead of on the fly),
                 # because we may need normalize the whole rollout.
-                compute_advantages_and_returns(self.args, rollout_data)
-                log_train_advantage_computation_event(rollout_data)
+                with cuda_phase(benchmark_memory, "advantages_and_returns"):
+                    compute_advantages_and_returns(self.args, rollout_data)
+                    log_train_advantage_computation_event(rollout_data)
 
             if self.rollout_data_postprocess is not None:
                 self.rollout_data_postprocess(self.args)
@@ -610,6 +617,7 @@ class MegatronTrainRayActor(TrainRayActor):
                     witness_info=witness_info,
                     attempt=attempt,
                     ft_test_action_executor=self._ft_test_action_executor,
+                    benchmark_memory=benchmark_memory,
                 )
 
             self.prof.step(rollout_id=rollout_id)
@@ -644,22 +652,38 @@ class MegatronTrainRayActor(TrainRayActor):
             commit_trained_batch(rollout_data, rollout_id, self._multi_lora_pending_push)
 
         extra_metrics = self.weight_updater.pop_metrics()
-        if self.args.benchmark_output is not None:
-            peak_memory = torch.tensor(
-                [
-                    torch.cuda.max_memory_allocated() / 1024**3,
-                    torch.cuda.max_memory_reserved() / 1024**3,
-                ],
-                dtype=torch.float64,
-                device=torch.device("cuda", torch.cuda.current_device()),
-            )
-            dist.all_reduce(peak_memory, op=dist.ReduceOp.MAX)
-            extra_metrics["perf/peak_allocated_memory_gib"] = peak_memory[0].item()
-            extra_metrics["perf/peak_memory_gib"] = peak_memory[1].item()
-        log_perf_data(rollout_id, self.args, extra_metrics=extra_metrics)
+        benchmark_memory_by_rank = None
+        if benchmark_memory is not None:
+            benchmark_memory_by_rank = benchmark_memory.gather(get_gloo_group())
+            peak_allocated, peak_reserved = global_phase_peaks(benchmark_memory_by_rank)
+            extra_metrics["perf/peak_allocated_memory_gib"] = peak_allocated
+            extra_metrics["perf/peak_memory_gib"] = peak_reserved
+        log_perf_data(
+            rollout_id,
+            self.args,
+            extra_metrics=extra_metrics,
+            benchmark_memory_by_rank=benchmark_memory_by_rank,
+        )
 
         self._heartbeat.bump()
         return train_step_outcome
+
+    def _create_benchmark_memory_tracker(self) -> CudaPhaseMemoryTracker | None:
+        if self.args.benchmark_output is None:
+            return None
+        parallel_state = get_parallel_state()
+        return CudaPhaseMemoryTracker(
+            {
+                "global": dist.get_rank(),
+                "device": torch.cuda.current_device(),
+                "tp": parallel_state.tp.rank,
+                "pp": parallel_state.pp.rank,
+                "cp": parallel_state.cp.rank,
+                "ep": parallel_state.ep.rank,
+                "etp": parallel_state.etp.rank,
+                "dp": parallel_state.effective_dp.rank,
+            }
+        )
 
     @with_logs
     @timer

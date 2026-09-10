@@ -20,6 +20,7 @@ def log_perf_data_raw(
     is_primary_rank: bool,
     compute_total_fwd_flops: Callable,
     extra_metrics: dict | None = None,
+    benchmark_memory_by_rank: list[dict] | None = None,
 ) -> None:
     timer_instance = Timer()
     log_dict_raw = deepcopy(timer_instance.log_dict())
@@ -67,6 +68,7 @@ def log_perf_data_raw(
             step_seconds=log_dict["perf/train_time"],
             peak_memory_gib=log_dict["perf/peak_memory_gib"],
             peak_allocated_memory_gib=log_dict["perf/peak_allocated_memory_gib"],
+            benchmark_memory_by_rank=benchmark_memory_by_rank,
         )
 
     logger.info(f"perf {rollout_id}: {log_dict}")
@@ -83,6 +85,7 @@ def _write_benchmark_step(
     step_seconds: float,
     peak_memory_gib: float,
     peak_allocated_memory_gib: float,
+    benchmark_memory_by_rank: list[dict] | None = None,
 ) -> None:
     if args.benchmark_output is None:
         return
@@ -93,10 +96,19 @@ def _write_benchmark_step(
         "step_seconds": [],
         "peak_memory_gib": [],
         "peak_allocated_memory_gib": [],
+        "phase_memory_by_step": [],
     }
-    if rollout_id != args.start_rollout_id:
-        if path.exists():
-            result = json.loads(path.read_text(encoding="utf-8"))
+    is_warmup = rollout_id == args.start_rollout_id
+    if not is_warmup and path.exists():
+        result = json.loads(path.read_text(encoding="utf-8"))
+    result["phase_memory_by_step"].append(
+        {
+            "rollout_id": rollout_id,
+            "is_warmup": is_warmup,
+            "ranks": benchmark_memory_by_rank or [],
+        }
+    )
+    if not is_warmup:
         result["step_seconds"].append(float(step_seconds))
         result["peak_memory_gib"].append(float(peak_memory_gib))
         result["peak_allocated_memory_gib"].append(float(peak_allocated_memory_gib))

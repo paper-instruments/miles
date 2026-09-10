@@ -30,6 +30,7 @@ from miles.backends.megatron_utils.ft.types import TrainStepOutcome
 from miles.backends.megatron_utils.local_weight_checksum import dump_local_weight_checksums
 from miles.utils.audit_utils.witness.allocator import WitnessInfo
 from miles.utils.audit_utils.witness.module import witness_dump_and_clear_stale
+from miles.utils.benchmark_memory import CudaPhaseMemoryTracker, cuda_phase
 from miles.utils.dumper_utils import DumperMegatronUtil, DumperPhase
 from miles.utils.memory_utils import clear_memory
 from miles.utils.multi_lora import is_multi_lora_enabled
@@ -425,6 +426,7 @@ def train_one_step(
     witness_info: WitnessInfo | None,
     attempt: int,
     ft_test_action_executor: FTTestActionActorExecutor | None = None,
+    benchmark_memory: CudaPhaseMemoryTracker | None = None,
 ) -> tuple[dict[str, float], float, TrainStepOutcome]:
     """Execute a single pipeline-parallel training step.
 
@@ -565,16 +567,17 @@ def train_one_step(
 
     # Forward pass.
     forward_backward_func = get_forward_backward_func()
-    losses_reduced = forward_backward_func(
-        forward_step_func=forward_step,
-        data_iterator=data_iterator,
-        model=model,
-        num_microbatches=num_microbatches,
-        seq_length=args.seq_length,
-        micro_batch_size=args.micro_batch_size,
-        decoder_seq_length=args.decoder_seq_length,
-        forward_only=False,
-    )
+    with cuda_phase(benchmark_memory, f"train_step_{step_id}_forward_backward"):
+        losses_reduced = forward_backward_func(
+            forward_step_func=forward_step,
+            data_iterator=data_iterator,
+            model=model,
+            num_microbatches=num_microbatches,
+            seq_length=args.seq_length,
+            micro_batch_size=args.micro_batch_size,
+            decoder_seq_length=args.decoder_seq_length,
+            forward_only=False,
+        )
 
     outcome = TrainStepOutcome.NORMAL
     grad_norm = 0.0
@@ -619,25 +622,27 @@ def train_one_step(
     if outcome == TrainStepOutcome.NORMAL:
         dumper_phase_util.finalize(model)
 
-    if not disable_optimizer and valid_step:
-        if multi_lora:
-            from miles.backends.megatron_utils.multi_lora_utils import step_stepped_adapter_slots
+    with cuda_phase(benchmark_memory, f"train_step_{step_id}_optimizer"):
+        if not disable_optimizer and valid_step:
+            if multi_lora:
+                from miles.backends.megatron_utils.multi_lora_utils import step_stepped_adapter_slots
 
-            grad_norm = step_stepped_adapter_slots(
-                args, model, optimizer, data_iterator[0].rollout_data, rollout_id, step_id
-            )
-        else:
-            # Update parameters.
-            update_successful, grad_norm, num_zeros_in_grad = optimizer.step()
+                grad_norm = step_stepped_adapter_slots(
+                    args, model, optimizer, data_iterator[0].rollout_data, rollout_id, step_id
+                )
+            else:
+                # Update parameters.
+                update_successful, grad_norm, num_zeros_in_grad = optimizer.step()
 
-            # Update learning rate.
-            assert update_successful
-            opt_param_scheduler.step(increment=num_rollouts)
+                # Update learning rate.
+                assert update_successful
+                opt_param_scheduler.step(increment=num_rollouts)
 
     # release grad (multi-LoRA retains accumulated grads; stepped slots were
     # zeroed selectively inside step_adapter_slots)
-    if not multi_lora:
-        _zero_grads(model, optimizer, disable_optimizer)
+    with cuda_phase(benchmark_memory, f"train_step_{step_id}_zero_grad"):
+        if not multi_lora:
+            _zero_grads(model, optimizer, disable_optimizer)
 
     log_structured(
         logger.info,
@@ -689,6 +694,7 @@ def train(
     witness_info: WitnessInfo | None,
     attempt: int,
     ft_test_action_executor: FTTestActionActorExecutor | None = None,
+    benchmark_memory: CudaPhaseMemoryTracker | None = None,
 ) -> TrainStepOutcome:
     """Run training over a rollout consisting of multiple steps.
 
@@ -796,6 +802,7 @@ def train(
             witness_info=witness_info,
             attempt=attempt,
             ft_test_action_executor=ft_test_action_executor,
+            benchmark_memory=benchmark_memory,
         )
 
         if step_id == 0:
