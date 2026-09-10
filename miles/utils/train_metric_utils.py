@@ -98,7 +98,8 @@ def _write_benchmark_step(
         "peak_allocated_memory_gib": [],
         "phase_memory_by_step": [],
     }
-    is_warmup = rollout_id == args.start_rollout_id
+    is_warmup = not getattr(args, "_benchmark_step_written", False)
+    args._benchmark_step_written = True
     if not is_warmup and path.exists():
         result = json.loads(path.read_text(encoding="utf-8"))
     result["phase_memory_by_step"].append(
