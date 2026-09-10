@@ -93,13 +93,13 @@ def test_non_primary_rank_logs_nothing(timer, logged):
     assert logged == []
 
 
-def test_benchmark_output_excludes_warmup(tmp_path):
+def test_benchmark_output_excludes_first_write_as_warmup(tmp_path):
     path = tmp_path / "benchmark.json"
     args = SimpleNamespace(benchmark_output=str(path), start_rollout_id=0)
 
     train_metric_utils._write_benchmark_step(
         args,
-        rollout_id=0,
+        rollout_id=1,
         step_seconds=99.0,
         peak_memory_gib=180.0,
         peak_allocated_memory_gib=170.0,
@@ -107,7 +107,7 @@ def test_benchmark_output_excludes_warmup(tmp_path):
     )
     train_metric_utils._write_benchmark_step(
         args,
-        rollout_id=1,
+        rollout_id=2,
         step_seconds=10.0,
         peak_memory_gib=175.0,
         peak_allocated_memory_gib=165.0,
@@ -121,12 +121,12 @@ def test_benchmark_output_excludes_warmup(tmp_path):
         "peak_allocated_memory_gib": [165.0],
         "phase_memory_by_step": [
             {
-                "rollout_id": 0,
+                "rollout_id": 1,
                 "is_warmup": True,
                 "ranks": [{"rank": {"global": 0}, "phases": [{"name": "warmup"}]}],
             },
             {
-                "rollout_id": 1,
+                "rollout_id": 2,
                 "is_warmup": False,
                 "ranks": [{"rank": {"global": 0}, "phases": [{"name": "measured"}]}],
             },
