@@ -31,7 +31,7 @@ from miles.backends.megatron_utils.local_weight_checksum import dump_local_weigh
 from miles.utils.audit_utils.witness.allocator import WitnessInfo
 from miles.utils.audit_utils.witness.module import witness_dump_and_clear_stale
 from miles.utils.benchmark_memory import CudaPhaseMemoryTracker, cuda_phase
-from miles.utils.component_profile import profile_module_forward
+from miles.utils.component_profile import profile_each_call, profile_module_forward
 from miles.utils.dumper_utils import DumperMegatronUtil, DumperPhase
 from miles.utils.memory_utils import clear_memory
 from miles.utils.multi_lora import is_multi_lora_enabled
@@ -297,6 +297,7 @@ def forward_only(
 
     config = get_model_config(model[0])
 
+    @profile_each_call("miles.microbatch.log_probs_forward")
     @dumper_phase_util.wrap_forward_step
     def forward_step(
         data_iterator: DataIterator, model: GPTModel, return_schedule_plan: bool = False
@@ -472,6 +473,7 @@ def train_one_step(
         custom_before_train_step_hook = load_function(args.custom_megatron_before_train_step_hook_path)
         custom_before_train_step_hook(args, rollout_id, step_id, model, optimizer, opt_param_scheduler)
 
+    @profile_each_call(f"miles.microbatch.train_step_{step_id}_forward")
     @dumper_phase_util.wrap_forward_step
     def forward_step(data_iterator: DataIterator, model: GPTModel, return_schedule_plan: bool = False) -> tuple[
         torch.Tensor,

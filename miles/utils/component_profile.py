@@ -32,6 +32,28 @@ def profile_function(name: str):
     return decorator
 
 
+def profile_each_call(name: str):
+    """Add an incrementing profiler range around each call to a function."""
+
+    def decorator(func):
+        if not _ENABLED:
+            return func
+
+        call_index = 0
+
+        @wraps(func)
+        def wrapped(*args, **kwargs):
+            nonlocal call_index
+            current_index = call_index
+            call_index += 1
+            with component_profile(f"{name}.{current_index}"):
+                return func(*args, **kwargs)
+
+        return wrapped
+
+    return decorator
+
+
 def profile_method(cls, method_name: str, name: str) -> None:
     """Add an opt-in profiler range around a class method once."""
     if not _ENABLED:
