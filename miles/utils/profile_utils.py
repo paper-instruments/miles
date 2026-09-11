@@ -93,6 +93,8 @@ def _trace_handler(args, name):
         summary_path = output_dir / f"{name}_rank_{rank}_key_averages.json"
         summary_path.write_text(json.dumps(rows, indent=2))
         logger.info("Saved PyTorch profiler summary to %s", summary_path)
+        if not any(row["device_time_total_us"] > 0 for row in rows):
+            raise RuntimeError(f"PyTorch profiler captured no device activity for {name} on rank {rank}")
 
     return handler
 
@@ -101,8 +103,12 @@ def _create_torch_profiler(args, name):
     return torch.profiler.profile(
         schedule=torch.profiler.schedule(
             # TODO the train_actor and train_log_probs ones may need to have different args to control step
-            wait=max(args.profile_step_start - 1, 0),
-            warmup=1 if args.profile_step_start > 0 else 0,
+            # Keep Kineto completely dormant before the requested window. A
+            # WARMUP action prepares device collection and can exhaust CUPTI's
+            # buffers during a long Miles rollout even though those events are
+            # later discarded.
+            wait=args.profile_step_start,
+            warmup=0,
             active=args.profile_step_end - args.profile_step_start,
             repeat=1,
         ),
