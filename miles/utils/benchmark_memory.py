@@ -7,6 +7,8 @@ from typing import Any
 import torch
 import torch.distributed as dist
 
+from miles.utils.component_profile import component_profile
+
 _GIB = 1024**3
 
 
@@ -54,8 +56,11 @@ class CudaPhaseMemoryTracker:
         return [record for record in gathered if record is not None]
 
 
+@contextmanager
 def cuda_phase(tracker: CudaPhaseMemoryTracker | None, name: str):
-    return tracker.phase(name) if tracker is not None else nullcontext()
+    with component_profile(f"miles.phase.{name}"):
+        with tracker.phase(name) if tracker is not None else nullcontext():
+            yield
 
 
 def global_phase_peaks(records: list[dict[str, Any]]) -> tuple[float, float]:

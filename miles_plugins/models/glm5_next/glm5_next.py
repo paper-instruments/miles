@@ -12,6 +12,7 @@ from megatron.core.transformer.spec_utils import ModuleSpec
 from megatron.core.transformer.transformer_block import TransformerBlock, get_num_layers_to_build
 from megatron.core.transformer.transformer_layer import get_transformer_layer_offset
 
+from miles.utils.component_profile import component_profile, profile_method
 from miles.utils.hf_config import load_hf_config
 from miles_plugins.models.glm5.glm5 import DSASelfAttentionSubmodules
 from miles_plugins.models.glm5_next.dsa import Glm5NextDSAAttention
@@ -61,7 +62,8 @@ def _patch_mean_output_contract() -> None:
         return
 
     def _mean_output_contract(hidden_states, head_fn, base, scale, n, eps):
-        return HyperConnectionModule.output_contract(hidden_states, n)
+        with component_profile("glm53.mhc.output_contract"):
+            return HyperConnectionModule.output_contract(hidden_states, n)
 
     transformer_block.learned_output_contract = _mean_output_contract
 
@@ -100,6 +102,27 @@ def _patch_reference_proj_rms() -> None:
     hyper_connection._glm5_next_reference_proj_rms_patched = True
 
 
+def _install_component_profile_ranges() -> None:
+    from megatron.core.transformer.moe.moe_layer import MoELayer
+
+    for cls, method_name, name in (
+        (MoELayer, "forward", "glm53.moe.total"),
+        (MoELayer, "route", "glm53.moe.route"),
+        (MoELayer, "preprocess", "glm53.moe.preprocess"),
+        (MoELayer, "dispatch", "glm53.moe.dispatch"),
+        (MoELayer, "routed_experts_compute", "glm53.moe.experts"),
+        (MoELayer, "combine", "glm53.moe.combine"),
+        (MoELayer, "postprocess", "glm53.moe.postprocess"),
+        (MoELayer, "shared_experts_compute", "glm53.moe.shared_expert"),
+        (HyperConnectionModule, "forward", "glm53.mhc.total"),
+        (HyperConnectionModule, "compute_mappings", "glm53.mhc.compute_mappings"),
+        (HyperConnectionModule, "aggregate", "glm53.mhc.aggregate"),
+        (HyperConnectionModule, "apply_h_post", "glm53.mhc.apply_h_post"),
+        (HyperConnectionModule, "apply_h_res", "glm53.mhc.apply_h_res"),
+    ):
+        profile_method(cls, method_name, name)
+
+
 def get_glm5_next_spec(args, config, vp_stage=None):
     hf_config = load_hf_config(args.hf_checkpoint)
     text_config = _get_text_config(hf_config)
@@ -108,6 +131,7 @@ def get_glm5_next_spec(args, config, vp_stage=None):
     config.freeze_indexer = getattr(args, "freeze_indexer", False)
     _patch_mean_output_contract()
     _patch_reference_proj_rms()
+    _install_component_profile_ranges()
 
     kwargs = {"use_transformer_engine": True}
     if vp_stage is not None:

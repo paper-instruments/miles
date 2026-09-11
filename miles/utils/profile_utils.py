@@ -1,3 +1,4 @@
+import json
 import logging
 import time
 import traceback
@@ -16,7 +17,11 @@ class TrainProfiler:
         self._torch_profiler_overall = None
         self._memory_profiler_overall = None
 
-        if args.use_pytorch_profiler and ("train_overall" in args.profile_target):
+        if (
+            args.use_pytorch_profiler
+            and ("train_overall" in args.profile_target)
+            and _is_profile_rank(args)
+        ):
             self._torch_profiler_overall = _create_torch_profiler(args, name="train_overall")
 
         if args.record_memory_history and ("train_overall" in args.profile_target):
@@ -46,7 +51,7 @@ class TrainProfiler:
 
 
 def _profile_simple_loop(iterator, args, name):
-    if not (args.use_pytorch_profiler and (name in args.profile_target)):
+    if not (args.use_pytorch_profiler and (name in args.profile_target) and _is_profile_rank(args)):
         yield from iterator
         return
 
@@ -55,6 +60,41 @@ def _profile_simple_loop(iterator, args, name):
     for item in iterator:
         yield item
         torch_profiler.step()
+
+
+def _is_profile_rank(args) -> bool:
+    return not args.profile_ranks or torch.distributed.get_rank() in args.profile_ranks
+
+
+def _trace_handler(args, name):
+    rank = torch.distributed.get_rank()
+    output_dir = Path(args.tensorboard_dir)
+    output_dir.mkdir(parents=True, exist_ok=True)
+    tensorboard_handler = torch.profiler.tensorboard_trace_handler(
+        str(output_dir),
+        worker_name=f"{name}_rank_{rank}",
+        use_gzip=True,
+    )
+
+    def handler(profiler):
+        tensorboard_handler(profiler)
+        rows = [
+            {
+                "key": event.key,
+                "count": event.count,
+                "self_cpu_time_total_us": event.self_cpu_time_total,
+                "cpu_time_total_us": event.cpu_time_total,
+                "self_device_time_total_us": event.self_device_time_total,
+                "device_time_total_us": event.device_time_total,
+            }
+            for event in profiler.key_averages()
+        ]
+        rows.sort(key=lambda row: row["device_time_total_us"], reverse=True)
+        summary_path = output_dir / f"{name}_rank_{rank}_key_averages.json"
+        summary_path.write_text(json.dumps(rows, indent=2))
+        logger.info("Saved PyTorch profiler summary to %s", summary_path)
+
+    return handler
 
 
 def _create_torch_profiler(args, name):
@@ -66,15 +106,11 @@ def _create_torch_profiler(args, name):
             active=args.profile_step_end - args.profile_step_start,
             repeat=1,
         ),
-        on_trace_ready=torch.profiler.tensorboard_trace_handler(
-            args.tensorboard_dir,
-            worker_name=f"{name}_rank_{torch.distributed.get_rank()}",
-            use_gzip=True,
-        ),
-        record_shapes=True,
-        with_stack=True,
-        profile_memory=True,
-        with_flops=True,
+        on_trace_ready=_trace_handler(args, name),
+        record_shapes=args.pytorch_profiler_collect_shapes,
+        with_stack=args.pytorch_profiler_collect_callstack,
+        profile_memory=False,
+        with_flops=False,
     )
 
 

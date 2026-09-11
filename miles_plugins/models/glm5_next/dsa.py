@@ -6,6 +6,7 @@ from megatron.core.transformer.enums import AttnMaskType
 from megatron.core.transformer.module import mark_keep_in_fp32
 from megatron.core.transformer.moe.moe_utils import RouterGatingLinearFunction
 
+from miles.utils.component_profile import component_profile, profile_function
 from miles.utils.replay_base import indexer_replay_manager
 from miles_plugins.models.glm5.glm5 import DSAMLASelfAttention
 from miles_plugins.models.glm5.ops.sparse_mla import SparseMLA
@@ -70,65 +71,73 @@ class Glm5NextDSAAttention(DSAMLASelfAttention):
         assert hidden_states.ndim == 3, f"hidden_states should be 3D, [s, b, n*h], got {hidden_states.ndim}D"
         assert packed_seq_params is not None
 
-        q_compressed, _ = self.linear_q_down_proj(hidden_states)
-        q_compressed = q_compressed.squeeze(1)
+        with component_profile("glm53.dsa.mla_projections"):
+            q_compressed, _ = self.linear_q_down_proj(hidden_states)
+            q_compressed = q_compressed.squeeze(1)
 
-        kv_compressed, _ = self.linear_kv_down_proj(hidden_states)
-        if self.config.sequence_parallel:
-            kv_compressed = gather_from_sequence_parallel_region(kv_compressed)
-        kv_compressed = self.kv_layernorm(kv_compressed)
+            kv_compressed, _ = self.linear_kv_down_proj(hidden_states)
+            if self.config.sequence_parallel:
+                kv_compressed = gather_from_sequence_parallel_region(kv_compressed)
+            kv_compressed = self.kv_layernorm(kv_compressed)
 
-        q_compressed = self.q_layernorm(q_compressed)
-        q, _ = self.linear_q_up_proj(q_compressed)
-        q = q.view(*q.size()[:-1], self.num_attention_heads_per_partition, self.q_head_dim)
+            q_compressed = self.q_layernorm(q_compressed)
+            q, _ = self.linear_q_up_proj(q_compressed)
+            q = q.view(*q.size()[:-1], self.num_attention_heads_per_partition, self.q_head_dim)
 
-        w_kc, w_vc = self.linear_kv_up_proj.weight.unflatten(
-            0,
-            (-1, self.config.qk_head_dim + self.config.v_head_dim),
-        ).split([self.config.qk_head_dim, self.config.v_head_dim], dim=1)
+            w_kc, w_vc = self.linear_kv_up_proj.weight.unflatten(
+                0,
+                (-1, self.config.qk_head_dim + self.config.v_head_dim),
+            ).split([self.config.qk_head_dim, self.config.v_head_dim], dim=1)
 
-        query = torch.einsum("thd,hdm->thm", q, w_kc)
+            query = torch.einsum("thd,hdm->thm", q, w_kc)
 
-        kv_compressed = torch.nn.functional.rms_norm(
-            kv_compressed.float(),
-            normalized_shape=(kv_compressed.shape[-1],),
-            weight=self.linear_kv_up_proj.layer_norm_weight.float(),
-            eps=self.config.layernorm_epsilon,
-        ).to(kv_compressed.dtype)
-        kv_compressed = gather_from_sequence_parallel_region(
-            kv_compressed, group=parallel_state.get_context_parallel_group()
-        )
+            kv_compressed = torch.nn.functional.rms_norm(
+                kv_compressed.float(),
+                normalized_shape=(kv_compressed.shape[-1],),
+                weight=self.linear_kv_up_proj.layer_norm_weight.float(),
+                eps=self.config.layernorm_epsilon,
+            ).to(kv_compressed.dtype)
+            kv_compressed = gather_from_sequence_parallel_region(
+                kv_compressed, group=parallel_state.get_context_parallel_group()
+            )
 
-        query = query.contiguous()
-        key = kv_compressed.contiguous()
+            query = query.contiguous()
+            key = kv_compressed.contiguous()
 
-        q_compressed = q_compressed.detach()
-        hidden_states = hidden_states.detach()
+        with component_profile("glm53.dsa.indexer_projections"):
+            q_compressed = q_compressed.detach()
+            hidden_states = hidden_states.detach()
 
-        index_q, _ = self.wq_b(q_compressed)
-        index_q = index_q.view(*index_q.size()[:-1], self.config.index_num_attention_heads, self.config.index_head_dim)
-        if self.config.sequence_parallel:
-            index_q = gather_from_sequence_parallel_region(index_q)
+            index_q, _ = self.wq_b(q_compressed)
+            index_q = index_q.view(
+                *index_q.size()[:-1], self.config.index_num_attention_heads, self.config.index_head_dim
+            )
+            if self.config.sequence_parallel:
+                index_q = gather_from_sequence_parallel_region(index_q)
 
-        index_k, _ = self.wk(hidden_states)
-        index_k = self.k_norm(index_k.squeeze(1).float()).bfloat16()
-        if self.config.sequence_parallel:
-            index_k = gather_from_sequence_parallel_region(index_k)
-        index_k = gather_from_sequence_parallel_region(index_k, group=parallel_state.get_context_parallel_group())
+            index_k, _ = self.wk(hidden_states)
+            index_k = self.k_norm(index_k.squeeze(1).float()).bfloat16()
+            if self.config.sequence_parallel:
+                index_k = gather_from_sequence_parallel_region(index_k)
+            index_k = gather_from_sequence_parallel_region(
+                index_k, group=parallel_state.get_context_parallel_group()
+            )
 
-        gate_score = F.linear(hidden_states.squeeze(1), self.index_kpool_compress_gate)
-        if self.config.sequence_parallel:
-            gate_score = gather_from_sequence_parallel_region(gate_score)
-        gate_score = gather_from_sequence_parallel_region(
-            gate_score, group=parallel_state.get_context_parallel_group()
-        )
+            gate_score = F.linear(hidden_states.squeeze(1), self.index_kpool_compress_gate)
+            if self.config.sequence_parallel:
+                gate_score = gather_from_sequence_parallel_region(gate_score)
+            gate_score = gather_from_sequence_parallel_region(
+                gate_score, group=parallel_state.get_context_parallel_group()
+            )
 
-        head_weights = RouterGatingLinearFunction.apply(hidden_states, self.weights_proj.weight, None, torch.float32)
-        head_weights = head_weights.squeeze(1) * (
-            (self.config.index_num_attention_heads**-0.5) * (self.config.index_head_dim**-0.5)
-        )
-        if self.config.sequence_parallel:
-            head_weights = gather_from_sequence_parallel_region(head_weights)
+            head_weights = RouterGatingLinearFunction.apply(
+                hidden_states, self.weights_proj.weight, None, torch.float32
+            )
+            head_weights = head_weights.squeeze(1) * (
+                (self.config.index_num_attention_heads**-0.5) * (self.config.index_head_dim**-0.5)
+            )
+            if self.config.sequence_parallel:
+                head_weights = gather_from_sequence_parallel_region(head_weights)
 
         return query, key, w_vc, index_q, index_k, head_weights, gate_score
 
@@ -137,23 +146,26 @@ class Glm5NextDSAAttention(DSAMLASelfAttention):
             raise NotImplementedError("GLM-5.3 kpool indexer selection does not support context parallelism yet.")
         cu_seqlens = packed_seq_params.cu_seqlens_kv
         pool_cu_seqlens = pool_boundaries(cu_seqlens, self.index_kpool)
-        pooled_k = build_pooled_keys(
-            index_k,
-            gate_score,
-            self.index_kpool_compress_ape,
-            cu_seqlens,
-            self.index_kpool,
-        )
-        return kpool_select_topk(
-            index_q=index_q,
-            pooled_k=pooled_k,
-            head_weights=head_weights,
-            cu_seqlens=cu_seqlens,
-            pool_cu_seqlens=pool_cu_seqlens,
-            index_topk=self.index_topk,
-            kpool=self.index_kpool,
-        )
+        with component_profile("glm53.dsa.indexer.pool"):
+            pooled_k = build_pooled_keys(
+                index_k,
+                gate_score,
+                self.index_kpool_compress_ape,
+                cu_seqlens,
+                self.index_kpool,
+            )
+        with component_profile("glm53.dsa.indexer.topk"):
+            return kpool_select_topk(
+                index_q=index_q,
+                pooled_k=pooled_k,
+                head_weights=head_weights,
+                cu_seqlens=cu_seqlens,
+                pool_cu_seqlens=pool_cu_seqlens,
+                index_topk=self.index_topk,
+                kpool=self.index_kpool,
+            )
 
+    @profile_function("glm53.dsa.total")
     def forward(
         self,
         hidden_states,
@@ -189,9 +201,11 @@ class Glm5NextDSAAttention(DSAMLASelfAttention):
         query = F.pad(query, (0, _SPARSE_MLA_TAIL_DIM)).contiguous()
         key = F.pad(key, (0, _SPARSE_MLA_TAIL_DIM)).contiguous()
 
-        core_attn_out, _ = SparseMLA.apply(query, key, topk_indices, self.softmax_scale)
-        core_attn_out = torch.einsum("thm,hdm->thd", core_attn_out, w_vc)
-        core_attn_out = core_attn_out.reshape(core_attn_out.size(0), 1, -1)
+        with component_profile("glm53.dsa.sparse_mla"):
+            core_attn_out, _ = SparseMLA.apply(query, key, topk_indices, self.softmax_scale)
 
-        output, bias = self.linear_proj(core_attn_out)
-        return output, bias
+        with component_profile("glm53.dsa.value_and_output"):
+            core_attn_out = torch.einsum("thm,hdm->thd", core_attn_out, w_vc)
+            core_attn_out = core_attn_out.reshape(core_attn_out.size(0), 1, -1)
+            output, bias = self.linear_proj(core_attn_out)
+            return output, bias

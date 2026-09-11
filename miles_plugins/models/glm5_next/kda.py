@@ -13,6 +13,7 @@ except ImportError:
     fused_kda_gate = None
 
 from miles.backends.training_utils.cp_utils import build_gdn_cp_context
+from miles.utils.component_profile import component_profile, profile_function
 from miles_plugins.models.hf_attention import HuggingfaceAttention
 
 
@@ -84,65 +85,71 @@ class Glm5NextKDA(nn.Module):
         self.o_norm = FusedRMSNormGated(head_dim, eps=rms_norm_eps, activation="sigmoid")
         self.o_proj = nn.Linear(self.projection_size, hidden_size, bias=False)
 
+    @profile_function("glm53.kda.total")
     def forward(self, hidden_states: torch.Tensor, cu_seqlens: torch.Tensor):
         cp_context = build_gdn_cp_context(self, cu_seqlens, hidden_states.device)
 
-        mixed_qkv = torch.cat(
-            (self.q_proj(hidden_states), self.k_proj(hidden_states), self.v_proj(hidden_states)),
-            dim=-1,
-        )
+        with component_profile("glm53.kda.qkv"):
+            mixed_qkv = torch.cat(
+                (self.q_proj(hidden_states), self.k_proj(hidden_states), self.v_proj(hidden_states)),
+                dim=-1,
+            )
         conv_cu_seqlens = cp_context.cu_seqlens if cp_context is not None else cu_seqlens
-        mixed_qkv, _ = self.conv1d(
-            x=mixed_qkv,
-            cu_seqlens=conv_cu_seqlens,
-            cp_context=cp_context,
-        )
+        with component_profile("glm53.kda.short_conv"):
+            mixed_qkv, _ = self.conv1d(
+                x=mixed_qkv,
+                cu_seqlens=conv_cu_seqlens,
+                cp_context=cp_context,
+            )
         query, key, value = torch.split(mixed_qkv, [self.projection_size] * 3, dim=-1)
         query = query.unflatten(-1, (self.num_heads, self.head_dim))
         key = key.unflatten(-1, (self.num_heads, self.head_dim))
         value = value.unflatten(-1, (self.num_heads, self.head_dim))
 
-        beta = torch.sigmoid(self.b_proj(hidden_states).float())
-        forget = self.f_b_proj(self.f_a_proj(hidden_states))
-        g = fused_kda_gate(
-            forget.unflatten(-1, (self.num_heads, self.head_dim)),
-            self.A_log,
-            self.dt_bias,
-            lower_bound=self.gate_lower_bound,
-        )
-
-        if cp_context is not None:
-            core_attn_out, _ = chunk_kda(
-                query,
-                key,
-                value,
-                g=g,
-                beta=beta,
-                use_qk_l2norm_in_kernel=True,
-                cu_seqlens=cp_context.cu_seqlens,
-                cp_context=cp_context,
-            )
-        else:
-            core_attn_out, _ = chunk_kda(
-                query,
-                key,
-                value,
-                g=g,
-                beta=beta,
-                initial_state=None,
-                output_final_state=False,
-                use_qk_l2norm_in_kernel=True,
-                cu_seqlens=cu_seqlens,
+        with component_profile("glm53.kda.gates"):
+            beta = torch.sigmoid(self.b_proj(hidden_states).float())
+            forget = self.f_b_proj(self.f_a_proj(hidden_states))
+            g = fused_kda_gate(
+                forget.unflatten(-1, (self.num_heads, self.head_dim)),
+                self.A_log,
+                self.dt_bias,
+                lower_bound=self.gate_lower_bound,
             )
 
-        norm_gate = self.g_b_proj(self.g_a_proj(hidden_states))
-        out_shape = core_attn_out.shape
-        core_attn_out = self.o_norm(
-            core_attn_out.reshape(-1, self.head_dim),
-            norm_gate.reshape(-1, self.head_dim),
-        )
-        core_attn_out = core_attn_out.reshape(out_shape[0], out_shape[1], -1)
-        return self.o_proj(core_attn_out)
+        with component_profile("glm53.kda.core"):
+            if cp_context is not None:
+                core_attn_out, _ = chunk_kda(
+                    query,
+                    key,
+                    value,
+                    g=g,
+                    beta=beta,
+                    use_qk_l2norm_in_kernel=True,
+                    cu_seqlens=cp_context.cu_seqlens,
+                    cp_context=cp_context,
+                )
+            else:
+                core_attn_out, _ = chunk_kda(
+                    query,
+                    key,
+                    value,
+                    g=g,
+                    beta=beta,
+                    initial_state=None,
+                    output_final_state=False,
+                    use_qk_l2norm_in_kernel=True,
+                    cu_seqlens=cu_seqlens,
+                )
+
+        with component_profile("glm53.kda.norm_and_output"):
+            norm_gate = self.g_b_proj(self.g_a_proj(hidden_states))
+            out_shape = core_attn_out.shape
+            core_attn_out = self.o_norm(
+                core_attn_out.reshape(-1, self.head_dim),
+                norm_gate.reshape(-1, self.head_dim),
+            )
+            core_attn_out = core_attn_out.reshape(out_shape[0], out_shape[1], -1)
+            return self.o_proj(core_attn_out)
 
 
 class Glm5NextKDAAttention(HuggingfaceAttention):

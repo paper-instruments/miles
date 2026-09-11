@@ -11,6 +11,7 @@ from miles.backends.training_utils.loss_hub.opd import apply_opd_kl_to_advantage
 from miles.backends.training_utils.parallel import get_parallel_state
 from miles.utils.audit_utils.event_logger.logger import get_event_logger, is_event_logger_initialized
 from miles.utils.audit_utils.event_logger.models import TrainAdvantageComputationEvent
+from miles.utils.component_profile import component_profile
 from miles.utils.multi_lora import is_multi_lora_enabled
 from miles.utils.types import RolloutBatch
 
@@ -172,16 +173,20 @@ def loss_function(
 
     func = get_loss_function(args)
 
+    def profiled_loss(*loss_args):
+        with component_profile("glm53.policy_loss"):
+            return func(*loss_args)
+
     if args.recompute_loss_function:
         loss, log = checkpoint(
-            func,
+            profiled_loss,
             args,
             batch,
             logits,
             sum_of_sample_mean,
         )
     else:
-        loss, log = func(args, batch, logits, sum_of_sample_mean)
+        loss, log = profiled_loss(args, batch, logits, sum_of_sample_mean)
 
     # Forces autograd to traverse the full graph on every rank to avoid hang.
     if parallel_state.cp.size > 1 and args.allgather_cp:

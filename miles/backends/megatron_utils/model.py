@@ -31,6 +31,7 @@ from miles.backends.megatron_utils.local_weight_checksum import dump_local_weigh
 from miles.utils.audit_utils.witness.allocator import WitnessInfo
 from miles.utils.audit_utils.witness.module import witness_dump_and_clear_stale
 from miles.utils.benchmark_memory import CudaPhaseMemoryTracker, cuda_phase
+from miles.utils.component_profile import profile_module_forward
 from miles.utils.dumper_utils import DumperMegatronUtil, DumperPhase
 from miles.utils.memory_utils import clear_memory
 from miles.utils.multi_lora import is_multi_lora_enabled
@@ -56,6 +57,13 @@ from .model_provider import get_model_provider_func
 from .parallel import get_packed_seq_params
 
 logger = logging.getLogger(__name__)
+
+
+def _profile_output_layers(model: Sequence[DDP]) -> None:
+    for model_chunk in model:
+        for module_name, module in model_chunk.named_modules():
+            if module_name.rsplit(".", 1)[-1] == "output_layer":
+                profile_module_forward(module, "glm53.lm_head")
 
 
 def _has_loadable_ckpt(load_dir: str | None) -> bool:
@@ -161,6 +169,8 @@ def setup_model_and_optimizer(
 
             provider_func = wrap_model_provider_with_inkling_lora(provider_func, args)
         model = get_model(provider_func, ModelType.encoder_or_decoder)
+
+    _profile_output_layers(model)
 
     if args.debug_disable_optimizer:
         if is_first_replica_megatron_main_rank():

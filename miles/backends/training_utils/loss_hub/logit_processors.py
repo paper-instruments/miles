@@ -7,6 +7,7 @@ from miles.backends.training_utils.cp_utils import allgather_cp_redistribute, ge
 from miles.backends.training_utils.loss_hub.math_utils import calculate_log_probs_and_entropy
 from miles.backends.training_utils.parallel import get_parallel_state
 from miles.backends.training_utils.sampling_mask import build_local_sampling_mask
+from miles.utils.component_profile import profile_function
 from miles.utils.sampling_mask import RolloutSamplingMask
 
 
@@ -181,6 +182,7 @@ def get_responses(
         yield logits_chunk, tokens_chunk
 
 
+@profile_function("glm53.log_probs_and_entropy")
 def get_log_probs_and_entropy(
     logits: torch.Tensor,
     *,
