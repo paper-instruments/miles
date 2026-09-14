@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+import json
+import logging
 import time
 from contextlib import contextmanager, nullcontext
 from typing import Any
@@ -8,6 +10,31 @@ import torch
 import torch.distributed as dist
 
 _GIB = 1024**3
+logger = logging.getLogger(__name__)
+
+
+def log_cuda_memory_snapshot(name: str) -> None:
+    """Log one coarse CUDA-memory snapshot without enabling a profiler."""
+    device = torch.cuda.current_device()
+    free, total = torch.cuda.mem_get_info(device)
+    rank = dist.get_rank() if dist.is_initialized() else 0
+    logger.info(
+        "[benchmark-memory] %s",
+        json.dumps(
+            {
+                "name": name,
+                "rank": rank,
+                "device": device,
+                "allocated_gib": torch.cuda.memory_allocated(device) / _GIB,
+                "reserved_gib": torch.cuda.memory_reserved(device) / _GIB,
+                "peak_allocated_gib": torch.cuda.max_memory_allocated(device) / _GIB,
+                "peak_reserved_gib": torch.cuda.max_memory_reserved(device) / _GIB,
+                "driver_free_gib": free / _GIB,
+                "driver_total_gib": total / _GIB,
+            },
+            sort_keys=True,
+        ),
+    )
 
 
 class CudaPhaseMemoryTracker:

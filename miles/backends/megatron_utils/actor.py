@@ -19,7 +19,12 @@ from miles.utils import train_dump_utils
 from miles.utils.argparse_utils import inplace_modify_args
 from miles.utils.audit_utils.event_logger.logger import event_logger_context
 from miles.utils.audit_utils.witness.allocator import WitnessInfo
-from miles.utils.benchmark_memory import CudaPhaseMemoryTracker, cuda_phase, global_phase_peaks
+from miles.utils.benchmark_memory import (
+    CudaPhaseMemoryTracker,
+    cuda_phase,
+    global_phase_peaks,
+    log_cuda_memory_snapshot,
+)
 from miles.utils.context_utils import with_defer
 from miles.utils.distributed_utils import get_gloo_group
 from miles.utils.ft_utils.indep_dp import IndepDPInfo
@@ -195,6 +200,19 @@ class MegatronTrainRayActor(TrainRayActor):
             self.model, self.optimizer, self.opt_param_scheduler, loaded_rollout_id = initialize_model_and_optimizer(
                 args, role, checkpointing_context=checkpointing_context
             )
+
+        if args.benchmark_output is not None:
+            log_cuda_memory_snapshot("model_and_optimizer_initialized")
+            if is_lora_enabled(args):
+                from .lora_utils import validate_lora_trainable_parameters
+
+                trainable_tensors, trainable_elements = validate_lora_trainable_parameters(self.model)
+                logger.info(
+                    "[benchmark-lora] rank=%d trainable_tensors=%d local_trainable_elements=%d",
+                    dist.get_rank(),
+                    trainable_tensors,
+                    trainable_elements,
+                )
 
         parallel_state = get_parallel_state()
         if parallel_state.cp.size > 1:

@@ -211,6 +211,24 @@ def _is_adapter_param_name(name: str) -> bool:
     return "lora_" in name or (".adapter." in name and ("linear_in" in name or "linear_out" in name))
 
 
+def validate_lora_trainable_parameters(model: Sequence[torch.nn.Module]) -> tuple[int, int]:
+    """Verify that a benchmark is optimizing adapters, not frozen base weights."""
+    trainable = [
+        (name, parameter)
+        for chunk in model
+        for name, parameter in chunk.named_parameters()
+        if parameter.requires_grad
+    ]
+    if not trainable:
+        raise RuntimeError("LoRA is enabled but the model has no trainable parameters")
+
+    unexpected = [name for name, _ in trainable if not _is_adapter_param_name(name)]
+    if unexpected:
+        raise RuntimeError(f"LoRA benchmark found trainable base parameters: {unexpected[:8]}")
+
+    return len(trainable), sum(parameter.numel() for _, parameter in trainable)
+
+
 _param_grad_buffer_patched = False
 
 

@@ -8,6 +8,7 @@ from argparse import Namespace
 from unittest.mock import MagicMock
 
 import pytest
+import torch
 
 from miles.backends.megatron_utils.lora_utils import (
     _get_lora_class_name,
@@ -17,6 +18,7 @@ from miles.backends.megatron_utils.lora_utils import (
     convert_target_modules_to_megatron,
     is_lora_enabled,
     parse_exclude_modules,
+    validate_lora_trainable_parameters,
 )
 from miles.utils.lora import LORA_ADAPTER_NAME, is_lora_weight_name
 
@@ -268,6 +270,24 @@ class TestIsAdapterParamName:
     )
     def test_negative(self, name):
         assert _is_adapter_param_name(name) is False
+
+
+class TestValidateLoraTrainableParameters:
+    def test_accepts_only_adapter_parameters(self):
+        model = torch.nn.Module()
+        model.base = torch.nn.Linear(2, 2, bias=False)
+        model.base.requires_grad_(False)
+        model.adapter = torch.nn.Module()
+        model.adapter.linear_in = torch.nn.Linear(2, 1, bias=False)
+        model.adapter.linear_out = torch.nn.Linear(1, 2, bias=False)
+
+        assert validate_lora_trainable_parameters([model]) == (2, 4)
+
+    def test_rejects_trainable_base_parameters(self):
+        model = torch.nn.Linear(2, 2, bias=False)
+
+        with pytest.raises(RuntimeError, match="trainable base parameters"):
+            validate_lora_trainable_parameters([model])
 
 
 # ---------------------------------------------------------------------------
