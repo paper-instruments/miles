@@ -1,6 +1,9 @@
-from typing import NamedTuple
+from __future__ import annotations
 
-from miles.ray.rollout.rollout_server import RolloutServer
+from typing import TYPE_CHECKING, NamedTuple
+
+if TYPE_CHECKING:
+    from miles.ray.rollout.rollout_server import RolloutServer
 
 
 class CellIndexer(NamedTuple):
