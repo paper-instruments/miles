@@ -3,6 +3,7 @@ import logging
 import time
 from dataclasses import dataclass
 from pathlib import Path
+from typing import TYPE_CHECKING
 
 import ray
 from sglang.srt.constants import GPU_MEMORY_TYPE_CUDA_GRAPH, GPU_MEMORY_TYPE_KV_CACHE, GPU_MEMORY_TYPE_WEIGHTS
@@ -14,8 +15,6 @@ from miles.ray.rollout.debug_data import RolloutDataInjectionUtil, load_debug_ro
 from miles.ray.rollout.eval_fleet import EvalFleet
 from miles.ray.rollout.metrics import log_eval_rollout_data, log_eval_skip, log_rollout_data
 from miles.ray.rollout.rollout_data_conversion import postprocess_rollout_data
-from miles.ray.rollout.rollout_server import RolloutServer, start_rollout_servers
-from miles.ray.rollout.router_manager import start_session_server
 from miles.ray.rollout.server_cell import get_cell_indexer_of_id_map
 from miles.ray.rollout.train_data_conversion import (
     ROLLOUT_DATA_VALUE_SPEC,
@@ -44,6 +43,9 @@ from miles.utils.metric_checker import MetricChecker
 from miles.utils.misc import load_function
 from miles.utils.timer import timer
 from miles.utils.tracking_utils.tracking import init_tracking
+
+if TYPE_CHECKING:
+    from miles.ray.rollout.rollout_server import RolloutServer
 
 logging.getLogger("httpx").setLevel(logging.WARNING)
 logging.getLogger("httpcore").setLevel(logging.WARNING)
@@ -104,6 +106,9 @@ class RolloutManager:
         if self.args.debug_train_only:
             self.servers: dict[str, RolloutServer] = {}
         else:
+            from miles.ray.rollout.rollout_server import start_rollout_servers
+            from miles.ray.rollout.router_manager import start_session_server
+
             init_http_client(args)
             self.servers = start_rollout_servers(args, pg)
             start_session_server(args)
